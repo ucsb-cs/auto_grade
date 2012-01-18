@@ -1,0 +1,13 @@
+VERBOSE=yes
+LOGFILE=procmail.log
+
+:0 fhw :auto_grade.lock
+| ./auto_grade/auto_grade.py
+
+# Uncomment the following to allow for forwarding of messages which aren't
+# targeted towards auto_grade. By default these messages will be delivered to
+# the account's mailbox.
+
+#:0
+#* .
+#! account1@foo.com account2@bar.com
