@@ -1,11 +1,26 @@
 #!/usr/bin/env python
-import datetime, difflib, email, glob, logging, logging.handlers, os, re
-import shutil, signal, smtplib, sys, subprocess, tempfile, time
+import cStringIO
+import datetime
+import difflib
+import email
+import glob
+import logging
+import logging.handlers
+import os
+import re
+import select
+import shutil
+import signal
+import smtplib
+import sys
+import tempfile
+import time
 from optparse import OptionParser
 from subprocess import Popen, PIPE, STDOUT
 
 RE_USER_NAME = re.compile('([^@]+)@cs.ucsb.edu')
 RE_PROJECT = re.compile(r'[^+]+\+([^@/\\]+)@cs.ucsb.edu')
+
 
 class Turnin(object):
     """Base Turnin class. This will extract and make projects"""
@@ -21,7 +36,7 @@ class Turnin(object):
         self.turnin_dir = os.path.join(os.environ['HOME'], 'TURNIN', project)
         self.work_dir = os.path.join(self.turnin_dir, self.user)
         self.message = 'User: %s\nProject: %s\n' % (user, project)
-        
+
         if not self.get_latest_turnin() or not self.extract_submission():
             return
         self.status = "Success"
@@ -56,7 +71,7 @@ class Turnin(object):
     def extract_submission(self):
         self.message += '...Extracting submission\n'
         submission = os.path.join(self.turnin_dir, self.submission)
-        
+
         if os.path.isdir(self.work_dir):
             os.system('rm -rf %s' % self.work_dir)
         os.mkdir(self.work_dir)
@@ -73,7 +88,7 @@ class Turnin(object):
             os.remove(os.path.join(self.turnin_dir, self.submission))
             os.system('rm -rf %s' % os.path.join(self.turnin_dir, self.user))
 
-    def make_submission(self, src_dir = '', makefile=None, target='',
+    def make_submission(self, src_dir='', makefile=None, target='',
                         silent=False):
         if not silent:
             self.message += '...Making submission\n'
@@ -146,7 +161,7 @@ class Turnin(object):
             os.system('rm -rf %s' % src_dir)
         return True
 
-    def score_it(self, binary, max_time=5, diff_lines=None,
+    def score_it(self, binary, prefix='', max_time=5, diff_lines=None,
                  timeout_quit=False, check_status=False):
         self.max_time = max_time
         self.diff_lines = diff_lines
@@ -167,6 +182,8 @@ class Turnin(object):
         passed = 0
         total = 0
         for test in sorted(os.listdir(input_dir)):
+            if not test.startswith(prefix):
+                continue
             in_file = open(os.path.join(input_dir, test))
             out_file = os.path.join(output_dir, '%s.stdout' % test)
             if not os.path.isfile(out_file):
@@ -196,13 +213,12 @@ class Turnin(object):
                     max = 3 + self.diff_lines
                 else:
                     max = None
-                   
                 diff = '\n'.join(diff.split('\n')[3:max])
 
                 if check_status and status != int(open(status_file).read()):
                     diff += '\t\tStatus mismatch: Expected: '
                     diff += '%d, got: %d\n' % (my_status, status)
-            
+
             t_tot, t_pas = self.score_callback(test, true_output, output, diff)
             total += t_tot
             passed += t_pas
@@ -243,7 +259,6 @@ class Turnin(object):
         else:
             pt_str = 'pt'
 
-
         self.message += '\t%s - Failed (%s %s)\n' % (test, pt_val, pt_str)
         if self.diff_lines > 0:
             self.message += '\t...First %d lines of diff\n\n' % self.diff_lines
@@ -270,21 +285,31 @@ class Turnin(object):
         try:
             p = Popen(cmd.split(), stdin=in_file, stdout=PIPE, stderr=stderr,
                       cwd=tmp_dir)
+            poll = select.poll()
+            poll.register(p.stdout)
+            do_poll = True
             start = time.time()
-            status = p.poll()
-            while status == None:
-                if time.time() - start >= time_limit:
+            output = cStringIO.StringIO()
+            while do_poll:
+                remaining = start + time_limit - time.time()
+                if remaining <= 0:
                     if os.fork():
                         time.sleep(.01)
                         os.killpg(os.getpgid(p.pid), signal.SIGKILL)
                     else:
                         os.setpgrp()
                     return None, None
-                time.sleep(.01)
-                status = p.poll()
+                rlist = poll.poll(remaining)
+                for fd, event in rlist:
+                    output.write(os.read(fd, 1024))
+                    if event == select.POLLHUP:
+                        poll.unregister(fd)
+                        do_poll = False
+            status = p.wait()
+            output.seek(0)
         finally:
             shutil.rmtree(tmp_dir)
-        return status, p.stdout.readlines()
+        return status, output.readlines()
 
 
 class FileVerifier(object):
@@ -373,7 +398,6 @@ class ProcessEmail(object):
         # Get email message
         self.input = sys.stdin.read()
         message = email.message_from_string(self.input)
-        
         # Verify Message
         self.assert_valid_project(message['to'])
         self.assert_valid_user(message['from'])
@@ -384,13 +408,15 @@ class ProcessEmail(object):
     def get_triple_string(self):
         return "%s %s %s" % (self.project, self.user, self.action)
 
+
 def auto_grade(project, user, action, verbose):
     # Setup logging
-    log_path = os.path.join(project, '%s.log' % project)
+    homedir = os.path.expanduser('~')
+    log_path = os.path.join(homedir, 'logs', '%s.log' % project)
     logger = logging.getLogger('auto_grade')
     try:
         handler = logging.handlers.RotatingFileHandler(log_path,
-                                                       maxBytes=1024*1024,
+                                                       maxBytes=1024 * 1024,
                                                        backupCount=1000)
     except IOError:
         sys.stderr.write('Cannot open log file\n')
@@ -420,7 +446,7 @@ def auto_grade(project, user, action, verbose):
 
     for log_message in turnin.log_messages:
         logger.info(log_message)
-        
+
     # Send email
     smtp = smtplib.SMTP()
     smtp.connect('letters')
@@ -431,6 +457,7 @@ def auto_grade(project, user, action, verbose):
                   '%s@cs.ucsb.edu' % user, msg)
     smtp.quit()
 
+
 def display_scores(project):
     logs = glob.glob('%s.log*' % os.path.join(project, project))
     if not logs:
@@ -440,12 +467,13 @@ def display_scores(project):
     scores = {}
     for log_file in logs:
         for line in open(log_file).readlines():
-            if 'Score' not in line: continue
+            if 'Score' not in line:
+                continue
             ddate, ttime, _, _, user, _, score = line[:-1].split()
             ttime = ttime.split(',')[0]
             t = time.strptime('%s %s' % (ddate, ttime), '%Y-%m-%d %H:%M:%S')
             if user not in scores:
-                scores[user] = {t : score}
+                scores[user] = {t: score}
             elif t not in scores[user]:
                 scores[user][t] = score
 
@@ -458,7 +486,7 @@ def display_scores(project):
                                       scores[user][t], user)
                 already_score.append(score)
         print
-    
+
 if __name__ == '__main__':
     # Change dir to directory with this file.
     os.chdir(sys.path[0])
