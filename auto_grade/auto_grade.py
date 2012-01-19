@@ -237,13 +237,14 @@ class Turnin(object):
             return 1, 0
         return 1, 1
 
-    def generic_score_message(self, passed, total, header=None):
+    def generic_score_message(self, passed, total, header=None, log=True):
         if not header:
             header = 'Score'
         self.message += '\n%s: %d out of %d\n' % (header, passed, total)
-        self.log_messages.append('Score: %s %s %d/%d' % (self.user,
-                                                         self.project,
-                                                         passed, total))
+        if log:
+            self.log_messages.append('Score: %s %s %d/%d' % (self.user,
+                                                             self.project,
+                                                             passed, total))
 
     def score_timeout_failure(self, test):
         self.message += '\t%s - Took longer than %ds\n' % (test, self.max_time)
@@ -459,7 +460,8 @@ def auto_grade(project, user, action, verbose):
 
 
 def display_scores(project):
-    logs = glob.glob('%s.log*' % os.path.join(project, project))
+    log_path = os.path.join(os.path.expanduser('~'), 'logs', project)
+    logs = glob.glob('%s.log*' % log_path)
     if not logs:
         sys.stderr.write('No log file for project: %s\n' % project)
         sys.exit(1)

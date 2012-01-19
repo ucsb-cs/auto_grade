@@ -32,12 +32,14 @@ if __name__ == '__main__':
     if ret:
         sys.exit(ret)
 
+    sys.stdout.write('Sending submission notification...')
+    sys.stdout.flush()
     # Notify user of turnin
     smtp = smtplib.SMTP()
-    smtp.connect('letters')
+    smtp.connect('letters.cs.ucsb.edu')
     from_addr = '%s@cs.ucsb.edu' % os.getlogin()
     to_addr = '%s+%s@cs.ucsb.edu' % (user, project)
     message = 'To: %s\nSubject: %s\n' % (to_addr, target)
     smtp.sendmail(from_addr, to_addr, message)
-
     smtp.quit()
+    print ' turnin complete!'
