@@ -117,16 +117,21 @@ class Turnin(object):
         submitted = []
         for path, _, files in os.walk(self.work_dir):
             for filename in files:
-                tmp = os.path.join(path[len(self.work_dir) + 1:], filename)
+                tmp = os.path.join(path, filename)
                 submitted.append(tmp)
-
+        lower_mapping = dict((x.lower(), x) for x in submitted)
         for file_verifier in file_verifiers:
             success &= file_verifier.verify(self.work_dir)
             if file_verifier.exists:
-                submitted.remove(file_verifier.name)
-            self.message += file_verifier.message
+                if file_verifier.name in submitted:
+                    submitted.remove(file_verifier.name)
+                else:
+                    submitted.remove(os.path.join(self.work_dir,
+                                                  file_verifier.name))
+            self.message += file_verifier.message(self.work_dir)
 
         if exact and submitted:
+            submitted = [x[len(self.work_dir) + 1:] for x in submitted]
             self.message += '\textra files: %s\n' % ', '.join(submitted)
             success = False
 
@@ -162,22 +167,20 @@ class Turnin(object):
         return True
 
     def score_it(self, binary, prefix='', max_time=5, diff_lines=None,
-                 timeout_quit=False, check_status=False):
+                 timeout_quit=False, check_status=False, files=None,
+                 stderr=False, max_length=80):
         self.max_time = max_time
         self.diff_lines = diff_lines
-        self.message += '...Scoring\n'
+        self.message += '...Scoring %s\n' % prefix
         input_dir = os.path.join(self.project, 'input')
         output_dir = os.path.join(self.project, 'output')
 
         if not os.path.isdir(input_dir):
-            self.log_error('Failure: Scoring Input directory does not exist')
-            return None, None
+            raise Exception('Scoring input directory does not exist')
         if not os.path.isdir(output_dir):
-            self.log_error('Failure: Scoring Output directory does not exist')
-            return None, None
+            raise Exception('Scoring output directory does not exist')
         if not os.path.isfile(binary.split()[0]):
-            self.log_error('Binary does not exist')
-            return None, None
+            raise Exception('Scoring binary does not exist')
 
         passed = 0
         total = 0
@@ -187,16 +190,16 @@ class Turnin(object):
             in_file = open(os.path.join(input_dir, test))
             out_file = os.path.join(output_dir, '%s.stdout' % test)
             if not os.path.isfile(out_file):
-                self.log_error('Failure: No outfile: %s' % out_file)
+                raise Exception('No outfile: %s' % out_file)
                 return
             if check_status:
                 status_file = os.path.join(output_dir, '%s.status' % test)
                 if not os.path.isfile(status_file):
-                    self.log_error('Failure: No status file %s' % status_file)
-                    return None, None
+                    raise Exception('No status file %s' % status_file)
 
             true_output = open(out_file).readlines()
-            status, output = self.timed_subprocess(binary, in_file, max_time)
+            status, output = self.timed_subprocess(binary, in_file, max_time,
+                                                   files, stderr=stderr)
             in_file.close()
             if status == None:
                 if timeout_quit:
@@ -204,11 +207,18 @@ class Turnin(object):
                     return passed, -1
                 diff = None
             else:
+                if hasattr(self, 'normalize_output'):
+                    true_output = self.normalize_output(true_output, True)
+                    output = self.normalize_output(output)
+
                 # Only show diff_lines lines excluding first 3
                 # <= 0 show None | >0 Show up to that many | None show all
                 diff = ''
                 for line in difflib.unified_diff(true_output, output):
-                    diff += line
+                    if max_length and len(line) > max_length:
+                        diff += line[:max_length] + '<truncated>\n'
+                    else:
+                        diff += line
                 if self.diff_lines:
                     max = 3 + self.diff_lines
                 else:
@@ -226,7 +236,7 @@ class Turnin(object):
         return passed, total
 
     def score_callback(self, test_name, true_output, submit_output, diff):
-        """Returns the a touple of points. The first value is the number of
+        """Returns the a tuple of points. The first value is the number of
         points to add to the possible total. The second is the number of points
         to add to the current score."""
         if diff == None:
@@ -273,16 +283,19 @@ class Turnin(object):
         self.log_messages.append(message)
         self.message += '%s\n' % message
 
-    def timed_subprocess(self, cmd, in_file, time_limit, stderr=None):
+    def timed_subprocess(self, cmd, in_file, time_limit, files, stderr):
         """Returns output_file, returnstatus for ran process.
         Return status of None indicates the process timed out."""
 
-        if stderr == None:
+        if not stderr:
             stderr = open('/dev/null', 'w')
         else:
             stderr = STDOUT
 
         tmp_dir = tempfile.mkdtemp()
+        if files:
+            for src in files:
+                shutil.copy(src, tmp_dir)
         try:
             p = Popen(cmd.split(), stdin=in_file, stdout=PIPE, stderr=stderr,
                       cwd=tmp_dir)
@@ -315,7 +328,8 @@ class Turnin(object):
 
 class FileVerifier(object):
     def __init__(self, name, min_lines=0, max_lines=None,
-                 min_size=0, max_size=None, diff_file=None, optional=False):
+                 min_size=0, max_size=None, diff_file=None, optional=False,
+                 case_sensitive=True):
         self.name = name
         self.min_lines = min_lines
         self.max_lines = max_lines
@@ -323,44 +337,62 @@ class FileVerifier(object):
         self.max_size = max_size
         self.diff_file = diff_file
         self.optional = optional
+        self.case_sensitive = case_sensitive
         self.verified = False
         self.exists = False
 
     def verify(self, work_dir):
+        if not self.case_sensitive:
+            basename = os.path.basename(self.name)
+            work_dir = os.path.join(work_dir, os.path.dirname(self.name))
+            mapping = dict((x.lower(), x) for x in os.listdir(work_dir))
+            if basename in mapping:
+                if basename == self.name:
+                    self.name = mapping[self.name]
+                else:
+                    self.name = os.path.join(work_dir, mapping[basename])
         filename = os.path.join(work_dir, self.name)
-        template = '\t%%s %s%%s\n' % self.name
         try:
             with open(filename) as f:
                 self.exists = True
                 line_count = size = 0
                 for line_count, line in enumerate(f):
                     size += len(line)
+            line_count += 1
             if (self.min_lines and self.min_lines > line_count or
                 self.max_lines and self.max_lines < line_count):
-                self.message = template % ('failed', ' (invalid line count: '
-                                           'count=%d min=%s max=%s)' %
-                                           (line_count, self.min_lines,
-                                            self.max_lines))
+                self.message_args = ('failed', ' (invalid line count: '
+                                     'count=%d min=%s max=%s)' %
+                                     (line_count, self.min_lines,
+                                      self.max_lines))
                 return False
             elif (self.min_size and self.min_size > size or
                   self.max_size and self.max_size < size):
-                self.message = template % ('failed', ' (invalid file size)')
+                self.message_args = ('failed', ' (invalid file size)')
                 return False
             elif (self.diff_file and
                   not os.system('diff %s %s 2>&1 >/dev/null' %
                                 (filename, self.diff_file))):
-                self.message = template % ('failed', ' (file not modified)')
+                self.message_args = ('failed', ' (file not modified)')
                 return False
         except IOError:
             if self.optional:
-                self.message = template % ('passed', ' (missing optional)')
+                self.message_args = ('passed', ' (missing optional)')
                 self.verified = True
                 return True
-            self.message = template % ('failed', ' (file does not exist)')
+            self.message_args = ('failed', ' (file does not exist)')
             return False
-        self.message = template % ('passed', '')
+        self.message_args = ('passed', '')
         self.verified = True
         return True
+
+    def message(self, work_dir=''):
+        if self.name.startswith('/'):
+            name = self.name[len(work_dir) + 1:]
+        else:
+            name = self.name
+        template = '\t%%s %s%%s\n' % name
+        return template % self.message_args
 
 
 class ProcessEmail(object):
@@ -443,7 +475,7 @@ def auto_grade(project, user, action, verbose):
     message = "Status: %s\n%s" % (turnin.status, turnin.message)
     if verbose:
         print message
-        sys.exit(1)
+        sys.exit(0)
 
     for log_message in turnin.log_messages:
         logger.info(log_message)

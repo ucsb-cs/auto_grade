@@ -1,5 +1,8 @@
 #!/usr/bin/env python
-import os, re, smtplib, sys
+import os
+import re
+import smtplib
+import sys
 
 RE_TURNIN = re.compile('(\w+)@(\w+)')
 

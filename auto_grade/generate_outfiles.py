@@ -4,27 +4,36 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from optparse import OptionParser
 
-if __name__ == '__main__':
-    def usage():
-        sys.stderr.write('Usage: %s program input_dir output_dir\n' %
-                         os.path.basename(sys.argv[0]))
-        sys.exit(1)
 
-    if len(sys.argv) < 4:
-        usage()
+def main():
+    parser = OptionParser(usage='Usage: %prog [options] program [args...]')
+    parser.add_option('-i', '--input', default='input',
+                      help='Folder containing input files [default: %default]')
+    parser.add_option('-o', '--output', default='output',
+                      help='Folder to store output files [default: %default]')
+    parser.add_option('-p', '--prefix', default='',
+                      help='Only consider input files with this prefix')
+    options, args = parser.parse_args()
 
-    if not (os.path.isdir(sys.argv[2]) and os.path.isdir(sys.argv[3])):
-        sys.stderr.write('input_dir or output_dir is not a directory\n')
-        sys.exit(1)
+    if len(args) == 0:
+        parser.error('Must provide a binary')
+    elif not os.path.isfile(args[0]):
+        parser.error('"%s" does not exist' % args[0])
+    elif not os.path.isdir(options.input):
+        parser.error('input dir "%s" is not a directory' % options.input)
+    elif not os.path.isdir(options.output):
+        parser.error('output dir "%s" is not a directory' % options.output)
 
     null = open('/dev/null', 'w')
-    binary = [os.path.join(os.getcwd(), sys.argv[1])]
-    binary.extend(sys.argv[4:])
+    binary = [os.path.join(os.getcwd(), args[0])] + args[1:]
 
-    for test in sorted(os.listdir(sys.argv[2])):
-        in_file = open(os.path.join(os.getcwd(), sys.argv[2], test))
-        out_file = open(os.path.join(os.getcwd(), sys.argv[3],
+    for test in sorted(os.listdir(options.input)):
+        if not test.startswith(options.prefix):
+            continue
+        in_file = open(os.path.join(os.getcwd(), options.input, test))
+        out_file = open(os.path.join(os.getcwd(), options.output,
                                      '%s.stdout' % test), 'w')
 
         tmp_dir = tempfile.mkdtemp()
@@ -37,4 +46,8 @@ if __name__ == '__main__':
         finally:
             shutil.rmtree(tmp_dir)
         if p.returncode != 0:
-            print test
+            print 'Error on test "%s"' % test
+
+
+if __name__ == '__main__':
+    sys.exit(main())
