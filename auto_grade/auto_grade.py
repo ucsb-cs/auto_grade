@@ -499,6 +499,7 @@ def display_scores(project):
         sys.exit(1)
 
     scores = {}
+    user_max = {}
     for log_file in logs:
         for line in open(log_file).readlines():
             if 'Score' not in line:
@@ -510,14 +511,22 @@ def display_scores(project):
                 scores[user] = {t: score}
             elif t not in scores[user]:
                 scores[user][t] = score
+            else:
+                scores[user][t] = max(score, scores[user][t])
+            int_score = int(score.split('/')[0])
+            user_max[user] = max(user_max.setdefault(user, 0), int_score)
 
     for user in sorted(scores):
         already_score = []
         for t in sorted(scores[user]):
             score = scores[user][t]
             if score not in already_score:
-                print '%s % 7s %s' % (time.strftime('%a %b %d %I:%M %p', t),
-                                      scores[user][t], user)
+                if int(score.split('/')[0]) == user_max[user]:
+                    best='*'
+                else:
+                    best=' '
+                print '%s % 7s%s %s' % (time.strftime('%a %b %d %I:%M %p', t),
+                                      scores[user][t], best, user)
                 already_score.append(score)
         print
 
