@@ -307,11 +307,12 @@ class Turnin(object):
             while do_poll:
                 remaining = start + time_limit - time.time()
                 if remaining <= 0:
-                    if os.fork():
-                        time.sleep(.01)
-                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                    else:
-                        os.setpgrp()
+                    os.kill(p.pid, signal.SIGKILL)
+                    #if os.fork():
+                    #    time.sleep(.01)
+                    #    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    #else:
+                    #    os.setpgrp()
                     return None, None
                 rlist = poll.poll(remaining)
                 for fd, event in rlist:
@@ -443,21 +444,22 @@ class ProcessEmail(object):
 
 
 def auto_grade(project, user, action, verbose):
-    # Setup logging
-    homedir = os.path.expanduser('~')
-    log_path = os.path.join(homedir, 'logs', '%s.log' % project)
-    logger = logging.getLogger('auto_grade')
-    try:
-        handler = logging.handlers.RotatingFileHandler(log_path,
-                                                       maxBytes=1024 * 1024,
-                                                       backupCount=1000)
-    except IOError:
-        sys.stderr.write('Cannot open log file\n')
-        sys.exit(1)
-    formatter = logging.Formatter('%(asctime)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    if not verbose:
+        # Setup logging
+        homedir = os.path.expanduser('~')
+        log_path = os.path.join(homedir, 'logs', '%s.log' % project)
+        logger = logging.getLogger('auto_grade')
+        try:
+            handler = logging.handlers.RotatingFileHandler(log_path,
+                                                           maxBytes=1048576,
+                                                           backupCount=1000)
+        except IOError:
+            sys.stderr.write('Cannot open log file\n')
+            sys.exit(1)
+        formatter = logging.Formatter('%(asctime)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
 
     message = 'Submission: %s %s %s' % (user, project, action)
     if verbose > 0:

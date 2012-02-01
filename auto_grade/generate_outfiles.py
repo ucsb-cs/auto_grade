@@ -33,9 +33,11 @@ def main():
         if not test.startswith(options.prefix):
             continue
         in_file = open(os.path.join(os.getcwd(), options.input, test))
-        out_file = open(os.path.join(os.getcwd(), options.output,
-                                     '%s.stdout' % test), 'w')
-
+        out_file_name = os.path.join(os.getcwd(), options.output,
+                                     '%s.stdout' % test)
+        if os.path.isfile(out_file_name):
+            raise Exception('Output file %s already exists' % out_file_name)
+        out_file = open(out_file_name, 'w')
         tmp_dir = tempfile.mkdtemp()
         try:
             p = subprocess.Popen(binary, stdin=in_file, cwd=tmp_dir,
