@@ -524,13 +524,66 @@ def display_scores(project):
             score = scores[user][t]
             if score not in already_score:
                 if int(score.split('/')[0]) == user_max[user]:
-                    best='*'
+                    best = '*'
                 else:
-                    best=' '
+                    best = ' '
                 print '%s % 7s%s %s' % (time.strftime('%a %b %d %I:%M %p', t),
                                       scores[user][t], best, user)
                 already_score.append(score)
         print
+
+
+class UserDiffs(object):
+    def __init__(self, project, user):
+        self.project = project
+        self.user = user
+        self.turnin_dir = os.path.join(os.environ['HOME'], 'TURNIN', project)
+        self.get_turnins()
+        self.build_diffs()
+
+    def get_turnins(self):
+        if not os.path.isdir(self.turnin_dir):
+            print 'Failure: Turnin directory does not exist'
+            return
+
+        user_submission_re = re.compile('%s(-(\d+))?.tar.Z' % self.user)
+        submissions = {}
+        for elem in os.listdir(self.turnin_dir):
+            match = user_submission_re.match(elem)
+            if not match:
+                continue
+
+            if match.group(2):
+                submissions[int(match.group(2))] = elem
+            else:
+                submissions[0] = elem
+        self.submissions = [x[1] for x in sorted(submissions.items())]
+
+    def build_diffs(self):
+        base = new = None
+        for submission in self.submissions:
+            new = self.extract_submission(os.path.join(self.turnin_dir,
+                                                       submission))
+            if base and new:
+                print '---\n---Changed in %s---\n---' % submission
+                p = Popen('git diff -p --stat --color %s %s' % (base, new),
+                          shell=True, stdout=PIPE, stderr=STDOUT)
+                stdout, stderr = p.communicate()
+                print stdout
+                shutil.rmtree(base)
+            base = new
+        shutil.rmtree(base)
+
+    def extract_submission(self, submission):
+        tmp_dir = tempfile.mkdtemp()
+        p = Popen('tar -xvzf %s -C %s' % (submission, tmp_dir),
+                             shell=True, stdout=PIPE, stderr=STDOUT)
+        p.wait()
+        if p.returncode != 0:
+            shutil.rmtree(tmp_dir)
+            raise Exception('Extraction failed')
+        return tmp_dir
+
 
 if __name__ == '__main__':
     # Change dir to directory with this file.
@@ -539,12 +592,17 @@ if __name__ == '__main__':
     parser = OptionParser()
     parser.add_option('--process', action='store_true')
     parser.add_option('--scores')
+    parser.add_option('--diffs')
     parser.add_option('-v', '--verbose', action='count')
     options, args = parser.parse_args()
 
     if options.scores:
         display_scores(options.scores)
         sys.exit(1)
+    elif options.diffs:
+        if len(args) > 1:
+            parser.error('Incorrect number of arguments for --diffs')
+        UserDiffs(options.diffs, args[0])
     elif not options.process:
         """This is called from procmailrc on the machine letters.cs which is
            not suitable for a build environment"""
