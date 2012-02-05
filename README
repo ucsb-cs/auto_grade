@@ -2,7 +2,7 @@
 AUTO_GRADE README
 ------------------------------------------------------
 Author: Bryce boe
-Last Update: 2012/01/17
+Last Update: 2012/02/13
 
 
 ------------------------------------------------------
@@ -31,10 +31,8 @@ machine. This can be accomplished by simply doing:
 $ ssh-keygen
 $ cp ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
 
-The auto_grade folder contains auto_grade.py, the primary auto_grade file;
-generate_outfiles.py, a script to produce output files from a number of input
-files against a given input program, and a sample folder which contains the
-auto_grade module for the sample project.
+The auto_grade folder contains auto_grade.py, and a sample folder which
+contains the auto_grade module for the sample project.
 
 The TURNIN folder contains a folder called sample which is where submissions
 for the sample project will go. It also contains a solution to the project
@@ -57,14 +55,15 @@ Once the auto_grade files have been copied in the correct location, you will
 need to perform the following to test it using the sample application.
 
 1. Generate output files for the sample project.
-   From the auto_grade folder, execute the following:
+   From any folder, execute the following:
    
-   make -C sample/solution
-   ./generate_outfiles.py sample/solution/char_count sample/input sample/output
+   cp ~/auto_grade/sample/Makefile ~/auto_grade/sample/solution/
+   make -C ~/auto_grade/sample/solution/
+   ~/auto_grade/auto_grade.py --generate-expected sample
 
 2. Test user bboe's solution to the sample project:
    From your home directory, execute:
-   ./auto_grade/auto_grade.py --process sample bboe -v
+   ~/auto_grade/auto_grade.py -v --process sample bboe
 
    The -v argument means to print the output to the screen. Without that
    argument the output will be emailed to the student.

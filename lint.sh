@@ -18,7 +18,12 @@ if [ -n "$output" ]; then
     exit 1
 fi
 
-echo "---pyflakes---"
-find $dir -name [A-Za-z_]\*.py -exec pyflakes {} \;
+
+output=$(find $dir -name [A-Za-z_]\*.py -exec pyflakes {} \;)
+if [ -n "$output" ]; then
+    echo "---pyflakes---"
+    echo -e "$output"
+    exit 1
+fi
 
 exit 0

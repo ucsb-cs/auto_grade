@@ -1,6 +1,6 @@
 #!/usr/bin/env python
+import ConfigParser
 import cStringIO
-import datetime
 import difflib
 import email
 import glob
@@ -15,37 +15,172 @@ import smtplib
 import sys
 import tempfile
 import time
+from os.path import isdir, join
 from optparse import OptionParser
 from subprocess import Popen, PIPE, STDOUT
 
-RE_USER_NAME = re.compile('([^@]+)@cs.ucsb.edu')
-RE_PROJECT = re.compile(r'[^+]+\+([^@/\\]+)@cs.ucsb.edu')
 
-
-class Turnin(object):
-    """Base Turnin class. This will extract and make projects"""
-
-    def __init__(self, project, user, action, verbose):
-        self.status = "Failed"
+class Project(object):
+    """Base class for defining a project."""
+    def __init__(self, project):
         self.project = project
+        self.input_dir = None
+        self.build_dir = None
+
+        self.test_config = ConfigParser.SafeConfigParser()
+        files = ('tests.cfg', join(project, 'tests.cfg'))
+        if not self.test_config.read(files):
+            raise Exception('Could not find any tests.cfg')
+
+    @staticmethod
+    def point_string(points, with_pt=True):
+        if int(points) == points:
+            pt_val = '%d' % points
+        else:
+            pt_val = '%.2f' % points
+        if not with_pt:
+            return pt_val
+        if points > 1:
+            return pt_val + ' pts'
+        else:
+            return pt_val + ' pt'
+
+    @staticmethod
+    def timed_subprocess(cmd, in_file, time_limit, files, stderr,
+                         output_filter):
+        """Returns output_file, returnstatus for ran process.
+        Return status of None indicates the process timed out."""
+
+        if not stderr:
+            stderr = open('/dev/null', 'w')
+        else:
+            stderr = STDOUT
+
+        tmp_dir = tempfile.mkdtemp()
+        if files:
+            for src in files:
+                shutil.copy(src, tmp_dir)
+        try:
+            poll = select.epoll()
+            main_pipe = Popen(cmd.split(), stdin=in_file, stdout=PIPE,
+                              stderr=stderr, cwd=tmp_dir)
+            if output_filter:
+                filter_pipe = Popen(output_filter.split(), cwd=tmp_dir,
+                                    stdin=main_pipe.stdout, stdout=PIPE)
+                main_pipe.stdout.close()
+                poll.register(filter_pipe.stdout,
+                              select.EPOLLIN | select.EPOLLHUP)
+            else:
+                poll.register(main_pipe.stdout,
+                              select.EPOLLIN | select.EPOLLHUP)
+            do_poll = True
+            start = time.time()
+            output = cStringIO.StringIO()
+            while do_poll:
+                remaining = start + time_limit - time.time()
+                if remaining <= 0:
+                    os.kill(main_pipe.pid, signal.SIGKILL)
+                    #if os.fork():
+                    #    time.sleep(.01)
+                    #    os.killpg(os.getpgid(main_pipe.pid), signal.SIGKILL)
+                    #else:
+                    #    os.setpgrp()
+                    return None, None
+                rlist = poll.poll(remaining)
+                for file_descriptor, event in rlist:
+                    output.write(os.read(file_descriptor, 8192))
+                    if event == select.POLLHUP:
+                        poll.unregister(file_descriptor)
+                        do_poll = False
+            if output_filter:
+                filter_pipe.wait()
+            main_status = main_pipe.wait()
+            output.seek(0)
+            output = output.readlines()
+        finally:
+            shutil.rmtree(tmp_dir)
+        return main_status, output
+
+    def fetch_tests(self):
+        self.input_dir = join(self.project, 'input')
+        if not isdir(self.input_dir):
+            raise Exception('Scoring input directory does not exist')
+
+        config = self.test_config
+        test_files_dir = join(self.project, 'test_files')
+        if isdir(test_files_dir):
+            test_files = dict((x, join(test_files_dir, x)) for x in
+                              os.listdir(test_files_dir))
+        else:
+            test_files = {}
+
+        tests = sorted(os.listdir(self.input_dir))
+        for section in sorted(config.sections(), key=len, reverse=True):
+            count = 1
+            settings = TestSettings(self.test_config, section, self.project,
+                                    self.build_dir, test_files)
+            remaining = []
+            for test in tests:
+                if test.startswith(section):
+                    yield test, settings, count
+                    count += 1
+                else:
+                    remaining.append(test)
+            tests = remaining
+        if not tests:
+            return
+        settings = TestSettings(self.test_config, 'DEFAULT', self.project,
+                                self.build_dir, test_files)
+        for i, test in enumerate(tests):
+            yield test, settings, i + 1
+
+    def generate_output(self):
+        self.build_dir = join(os.getcwd(), self.project, 'solution')
+        if not isdir(self.build_dir):
+            raise Exception('Solution dir %r does not exist.' % self.build_dir)
+        output_dir = join(self.project, 'output')
+        if not isdir(output_dir):
+            os.mkdir(output_dir)
+        for test, settings, _ in self.fetch_tests():
+            print 'Running %r' % test
+            with open(join(self.input_dir, test)) as test_in:
+                status, output = self.timed_subprocess(settings.args, test_in,
+                                                       settings.time_limit,
+                                                       settings.files,
+                                                       settings.check_stderr,
+                                                       settings.output_filter)
+            if status is None:
+                raise Exception('Oops, you timed out')
+
+            with open(join(output_dir, '%s.stdout' % test), 'w') as file_obj:
+                file_obj.write(''.join(output))
+            # Always write status regardless of check_status setting
+            with open(join(output_dir, '%s.status' % test), 'w') as file_obj:
+                file_obj.write('%d\n' % status)
+
+
+class Submission(Project):
+    """Class for representing student submissions of a certain project."""
+    def __init__(self, project, user, action, verbose):
+        super(Submission, self).__init__(project)
         self.user = user
         self.log_messages = []
         self.submission = None
         self.verbose = verbose
-
-        self.turnin_dir = os.path.join(os.environ['HOME'], 'TURNIN', project)
-        self.work_dir = os.path.join(self.turnin_dir, self.user)
+        self.turnin_dir = join(os.environ['HOME'], 'TURNIN', project)
+        self.work_dir = join(self.turnin_dir, user)
         self.message = 'User: %s\nProject: %s\n' % (user, project)
 
-        if not self.get_latest_turnin() or not self.extract_submission():
-            return
-        self.status = "Success"
+        if self.get_latest_submission() and self.extract_submission():
+            self.status = "Success"
+        else:
+            self.status = "Failure"
 
-    def get_latest_turnin(self):
-        """Returns the name of the user's most recent turnin"""
+    def get_latest_submission(self):
+        """Returns the name of the user's most recent submission"""
         self.message += '...Finding most recent submission\n'
 
-        if not os.path.isdir(self.turnin_dir):
+        if not isdir(self.turnin_dir):
             self.log_error('Failure: Turnin directory does not exist')
             return False
 
@@ -70,64 +205,83 @@ class Turnin(object):
 
     def extract_submission(self):
         self.message += '...Extracting submission\n'
-        submission = os.path.join(self.turnin_dir, self.submission)
+        submission = join(self.turnin_dir, self.submission)
 
-        if os.path.isdir(self.work_dir):
-            os.system('rm -rf %s' % self.work_dir)
+        if isdir(self.work_dir):
+            shutil.rmtree(self.work_dir)
         os.mkdir(self.work_dir)
         os.chmod(self.work_dir, 0700)
-        p = Popen('tar -xvzf %s -C %s' % (submission, self.work_dir),
-                             shell=True, stdout=PIPE, stderr=STDOUT)
-        p.wait()
-        self.message += ''.join(['\t%s' % x for x in p.stdout.readlines()])
-        return p.returncode == 0
+        pipe = Popen('tar -xvzf %s -C %s' % (submission, self.work_dir),
+                     shell=True, stdout=PIPE, stderr=STDOUT)
+        pipe.wait()
+        self.message += ''.join(['\t%s' % x for x in pipe.stdout.readlines()])
+        return pipe.returncode == 0
 
     def delete_submission(self):
         """ Should only be used on test stuff """
         if self.submission:
-            os.remove(os.path.join(self.turnin_dir, self.submission))
-            os.system('rm -rf %s' % os.path.join(self.turnin_dir, self.user))
+            os.remove(join(self.turnin_dir, self.submission))
+            shutil.rmtree(join(self.turnin_dir, self.user))
 
-    def make_submission(self, src_dir='', makefile=None, target='',
-                        silent=False):
+    def copy_build_files(self):
+        build_files_path = join(self.project, 'build_files')
+        if not isdir(build_files_path):
+            return
+        for filename in os.listdir(build_files_path):
+            if os.path.isfile(join(self.build_dir, filename)):
+                continue
+            shutil.copy(join(build_files_path, filename), self.build_dir)
+
+    def make_submission(self, src_dir='', target='', silent=False):
+        self.build_dir = join(self.turnin_dir, self.user, src_dir)
+        if not isdir(self.build_dir):
+            self.log_error('Build directory %r does not exist' %
+                           self.build_dir)
+            return False
+
+        self.copy_build_files()
+
         if not silent:
             self.message += '...Making submission\n'
-        build_dir = os.path.join(self.turnin_dir, self.user, src_dir)
-        if not os.path.isdir(build_dir):
-            self.log_error('Build directory: %s does not exist' % build_dir)
-            return False
-        makefile_location = ''
-        if makefile:
-            if not os.path.isfile(makefile):
-                self.log_error('Make file %s does not exist' % makefile)
-                return False
-            makefile_location = '-f %s' % makefile
 
-        make_cmd = 'make %s -C %s %s' % (makefile_location, build_dir, target)
-        p = Popen(make_cmd, shell=True, stdout=PIPE, stderr=STDOUT)
-        p.wait()
+        makefile = join(os.getcwd(), self.project, 'Makefile')
+        if not os.path.isfile(makefile):
+            self.log_error('Make file %s does not exist' % makefile)
+            return False
+        makefile_location = '-f %s' % makefile
+
+        make_cmd = 'make %s -C %s %s' % (makefile_location, self.build_dir,
+                                         target)
+        pipe = Popen(make_cmd, shell=True, stdout=PIPE, stderr=STDOUT)
+        pipe.wait()
         if not silent:
-            self.message += ''.join(['\t%s' % x for x in p.stdout.readlines()])
-        return p.returncode == 0
+            self.message += ''.join(['\t%s' % x for x in
+                                     pipe.stdout.readlines()])
+        return pipe.returncode == 0
 
     def file_checker(self, file_verifiers, exact=False):
         success = True
         self.message += '...Verifying files\n'
 
+        original_files_dir = join(self.project, 'original_files')
+        if isdir(original_files_dir):
+            original_files = dict((x, join(original_files_dir, x)) for
+                                  x in os.listdir(original_files_dir))
+        else:
+            original_files = {}
+
         submitted = []
         for path, _, files in os.walk(self.work_dir):
             for filename in files:
-                tmp = os.path.join(path, filename)
-                submitted.append(tmp)
-        lower_mapping = dict((x.lower(), x) for x in submitted)
+                submitted.append(join(path, filename))
         for file_verifier in file_verifiers:
-            success &= file_verifier.verify(self.work_dir)
+            original_file = original_files.get(file_verifier.name)
+            success &= file_verifier.verify(self.work_dir, original_file)
             if file_verifier.exists:
                 if file_verifier.name in submitted:
                     submitted.remove(file_verifier.name)
                 else:
-                    submitted.remove(os.path.join(self.work_dir,
-                                                  file_verifier.name))
+                    submitted.remove(join(self.work_dir, file_verifier.name))
             self.message += file_verifier.message(self.work_dir)
 
         if exact and submitted:
@@ -143,221 +297,194 @@ class Turnin(object):
 
         try:
             # extract source
-            p = Popen('tar -xvzf %s -C %s' % (src_tarball, self.work_dir),
-                      shell=True, stdout=null, stderr=null)
-            p.wait()
-            if p.returncode != 0:
+            pipe = Popen('tar -xvzf %s -C %s' % (src_tarball, self.work_dir),
+                         shell=True, stdout=null, stderr=null)
+            pipe.wait()
+            if pipe.returncode != 0:
                 self.message += '\tsource extraction failed, contact TA\n'
                 return False
 
-            patch_file = open(os.path.join(self.work_dir, patch_filename))
-            p = Popen('patch -d %s -p1' % src_dir, shell=True,
+            patch_file = open(join(self.work_dir, patch_filename))
+            pipe = Popen('patch -d %s -p1' % src_dir, shell=True,
                       stdin=patch_file, stdout=PIPE, stderr=STDOUT)
-            stdout, _ = p.communicate()
+            stdout, _ = pipe.communicate()[:2]
             patch_file.close()
             self.message += '\n'.join(['\t%s' % x for x in stdout.split('\n')
                                        if x != ''])
             self.message += '\n'
-            if p.returncode != 0:
+            if pipe.returncode != 0:
                 return False
         finally:
             # cleanup
             null.close()
-            os.system('rm -rf %s' % src_dir)
+            shutil.rmtree(src_dir)
         return True
 
-    def score_it(self, binary, prefix='', max_time=5, diff_lines=None,
-                 timeout_quit=False, check_status=False, files=None,
-                 stderr=False, max_length=80):
-        self.max_time = max_time
-        self.diff_lines = diff_lines
-        self.message += '...Scoring %s\n' % prefix
-        input_dir = os.path.join(self.project, 'input')
-        output_dir = os.path.join(self.project, 'output')
-
-        if not os.path.isdir(input_dir):
-            raise Exception('Scoring input directory does not exist')
-        if not os.path.isdir(output_dir):
+    def score_it(self, score_msg='Tentative Score'):
+        output_dir = join(self.project, 'output')
+        if not isdir(output_dir):
             raise Exception('Scoring output directory does not exist')
-        if not os.path.isfile(binary.split()[0]):
-            raise Exception('Scoring binary does not exist')
 
-        passed = 0
-        total = 0
-        for test in sorted(os.listdir(input_dir)):
-            if not test.startswith(prefix):
-                continue
-            in_file = open(os.path.join(input_dir, test))
-            out_file = os.path.join(output_dir, '%s.stdout' % test)
+        self.message += '...Scoring\n'
+        passed = total = 0
+        for test, settings, count in self.fetch_tests():
+            name = '%s (%d)' % (settings.name if settings.name else test,
+                                count)
+            if settings.description:
+                name += ' [desc: %s]' % settings.description
+            out_file = join(output_dir, '%s.stdout' % test)
             if not os.path.isfile(out_file):
                 raise Exception('No outfile: %s' % out_file)
-                return
-            if check_status:
-                status_file = os.path.join(output_dir, '%s.status' % test)
-                if not os.path.isfile(status_file):
-                    raise Exception('No status file %s' % status_file)
+            status_file = join(output_dir, '%s.status' % test)
+            if not os.path.isfile(status_file):
+                raise Exception('No status file %s' % status_file)
 
-            true_output = open(out_file).readlines()
-            status, output = self.timed_subprocess(binary, in_file, max_time,
-                                                   files, stderr=stderr)
-            in_file.close()
+            total += settings.points_possible
+
+            expected = open(out_file).readlines()
+            with open(join(self.input_dir, test)) as test_in:
+                status, output = self.timed_subprocess(settings.args, test_in,
+                                                       settings.time_limit,
+                                                       settings.files,
+                                                       settings.check_stderr,
+                                                       settings.output_filter)
             if status == None:
-                if timeout_quit:
-                    self.score_timeout_failure(test)
+                self.score_timeout_failure(name, settings.points_possible,
+                                           settings.time_limit)
+
+                if settings.timeout_quit:
                     return passed, -1
-                diff = None
-            else:
-                if hasattr(self, 'normalize_output'):
-                    true_output = self.normalize_output(true_output, True)
-                    output = self.normalize_output(output)
+                continue
 
-                # Only show diff_lines lines excluding first 3
-                # <= 0 show None | >0 Show up to that many | None show all
-                diff = ''
-                for line in difflib.unified_diff(true_output, output):
-                    if max_length and len(line) > max_length:
-                        diff += line[:max_length] + '<truncated>\n'
-                    else:
-                        diff += line
-                if self.diff_lines:
-                    max = 3 + self.diff_lines
+            # Only show diff_lines lines excluding first 3
+            diff = []
+            for line in difflib.unified_diff(expected, output):
+                if len(line) > settings.diff_max_line_width:
+                    diff.append(line[:settings.diff_max_line_width] + '...\n')
                 else:
-                    max = None
-                diff = '\n'.join(diff.split('\n')[3:max])
+                    diff.append(line)
+            if settings.diff_lines < 0:
+                max_lines = None
+            else:
+                max_lines = 3 + settings.diff_lines
+            diff_lines = len(diff)
+            diff = ''.join(diff[3:max_lines])
+            if max_lines and max_lines < diff_lines:
+                diff += '...remaining diff truncated...\n'
 
-                if check_status and status != int(open(status_file).read()):
-                    diff += '\t\tStatus mismatch: Expected: '
-                    diff += '%d, got: %d\n' % (my_status, status)
+            if settings.check_status:
+                expected = int(open(status_file).read())
+                if status != expected:
+                    diff += ('\t\tStatus mismatch: Expected: '
+                             '%d, got: %d\n' % (expected, status))
 
-            t_tot, t_pas = self.score_callback(test, true_output, output, diff)
-            total += t_tot
-            passed += t_pas
-
-        return passed, total
-
-    def score_callback(self, test_name, true_output, submit_output, diff):
-        """Returns the a tuple of points. The first value is the number of
-        points to add to the possible total. The second is the number of points
-        to add to the current score."""
-        if diff == None:
-            self.score_timeout_failure(test_name)
-            return 1, 0
-        elif len(diff):
-            self.score_failure(test_name, diff)
-            return 1, 0
-        return 1, 1
+            if len(diff):
+                self.score_failure(name, settings.points_possible, diff)
+            else:
+                passed += settings.points
+        self.generic_score_message(passed, total, score_msg)
 
     def generic_score_message(self, passed, total, header=None, log=True):
         if not header:
             header = 'Score'
-        self.message += '\n%s: %d out of %d\n' % (header, passed, total)
+
+        passed = self.point_string(passed, False)
+        total = self.point_string(total, False)
+
+        self.message += '\n%s: %s out of %s\n' % (header, passed, total)
         if log:
-            self.log_messages.append('Score: %s %s %d/%d' % (self.user,
-                                                             self.project,
-                                                             passed, total))
+            self.log_messages.append('Score: %s %s/%s' % (self.user,
+                                                          passed, total))
 
-    def score_timeout_failure(self, test):
-        self.message += '\t%s - Took longer than %ds\n' % (test, self.max_time)
+    def score_timeout_failure(self, name, points, time_limit):
+        self.message += '\t%s - Took longer than %d seconds (%s)\n' % (
+            name, time_limit, self.point_string(points))
 
-    def score_failure(self, test, diff, points=1):
-        if int(points) == points:
-            pt_val = str(points)
-        else:
-            pt_val = '%.2f' % points
-
-        if points > 1:
-            pt_str = 'pts'
-        else:
-            pt_str = 'pt'
-
-        self.message += '\t%s - Failed (%s %s)\n' % (test, pt_val, pt_str)
-        if self.diff_lines > 0:
-            self.message += '\t...First %d lines of diff\n\n' % self.diff_lines
-            self.message += diff
-            self.message += '\n'
-        elif self.diff_lines == None:
-            self.message += diff
-            self.message += '\n'
+    def score_failure(self, name, points, diff):
+        self.message += '\t%s - Failed (%s)\n' % (name,
+                                                  self.point_string(points))
+        self.message += diff
+        self.message += '\n'
 
     def log_error(self, message):
         self.log_messages.append(message)
         self.message += '%s\n' % message
 
-    def timed_subprocess(self, cmd, in_file, time_limit, files, stderr):
-        """Returns output_file, returnstatus for ran process.
-        Return status of None indicates the process timed out."""
 
-        if not stderr:
-            stderr = open('/dev/null', 'w')
+class TestSettings(object):
+    def __init__(self, config, section, project_dir, build_dir, test_files):
+        self._config = config
+        self._section = section
+        self._items = dict(config.items(section))
+
+        self.args = join(build_dir, self._items['args'])
+        self.binary = self.args.split()[0]
+        if not os.path.isfile(self.binary):
+            raise Exception('Binary %r does not exist for section %r' %
+                            (self.binary, section))
+        self.files = [test_files[x.strip()] for x in
+                      self._items['files'].split(',') if x.strip()]
+        if self._items['output_filter']:
+            self.output_filter = join(os.getcwd(), project_dir,
+                                      self._items['output_filter'])
+            output_binary = self.output_filter.split()[0]
+            if not os.path.isfile(output_binary):
+                raise Exception('Output filter %r does not exist' %
+                                output_binary)
         else:
-            stderr = STDOUT
+            self.output_filter = None
 
-        tmp_dir = tempfile.mkdtemp()
-        if files:
-            for src in files:
-                shutil.copy(src, tmp_dir)
-        try:
-            p = Popen(cmd.split(), stdin=in_file, stdout=PIPE, stderr=stderr,
-                      cwd=tmp_dir)
-            poll = select.poll()
-            poll.register(p.stdout)
-            do_poll = True
-            start = time.time()
-            output = cStringIO.StringIO()
-            while do_poll:
-                remaining = start + time_limit - time.time()
-                if remaining <= 0:
-                    os.kill(p.pid, signal.SIGKILL)
-                    #if os.fork():
-                    #    time.sleep(.01)
-                    #    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                    #else:
-                    #    os.setpgrp()
-                    return None, None
-                rlist = poll.poll(remaining)
-                for fd, event in rlist:
-                    output.write(os.read(fd, 1024))
-                    if event == select.POLLHUP:
-                        poll.unregister(fd)
-                        do_poll = False
-            status = p.wait()
-            output.seek(0)
-        finally:
-            shutil.rmtree(tmp_dir)
-        return status, output.readlines()
+    def __getattr__(self, attribute):
+        if attribute in ('timeout_quit', 'check_status', 'check_stderr'):
+            return self._config.getboolean(self._section, attribute)
+        if attribute in ('points', 'points_possible', 'time_limit'):
+            return float(self._items[attribute])
+        if attribute in ('diff_lines', 'diff_max_line_width'):
+            return int(self._items[attribute])
+        return self._items[attribute]
 
 
 class FileVerifier(object):
     def __init__(self, name, min_lines=0, max_lines=None,
                  min_size=0, max_size=None, diff_file=None, optional=False,
-                 case_sensitive=True):
+                 case_sensitive=True, bad_re=None, bad_re_msg=None):
         self.name = name
         self.min_lines = min_lines
         self.max_lines = max_lines
         self.min_size = min_size
         self.max_size = max_size
-        self.diff_file = diff_file
         self.optional = optional
         self.case_sensitive = case_sensitive
+        self.bad_re = bad_re
+        self.bad_re_msg = bad_re_msg
         self.verified = False
         self.exists = False
+        self.message_args = None
 
-    def verify(self, work_dir):
+    def verify(self, work_dir, diff_file=None):
         if not self.case_sensitive:
             basename = os.path.basename(self.name)
-            work_dir = os.path.join(work_dir, os.path.dirname(self.name))
+            work_dir = join(work_dir, os.path.dirname(self.name))
             mapping = dict((x.lower(), x) for x in os.listdir(work_dir))
             if basename in mapping:
                 if basename == self.name:
                     self.name = mapping[self.name]
                 else:
-                    self.name = os.path.join(work_dir, mapping[basename])
-        filename = os.path.join(work_dir, self.name)
+                    self.name = join(work_dir, mapping[basename])
+        filename = join(work_dir, self.name)
+        invalid_lines = []
         try:
-            with open(filename) as f:
+            with open(filename) as file_obj:
                 self.exists = True
                 line_count = size = 0
-                for line_count, line in enumerate(f):
+                for line_count, line in enumerate(file_obj):
+                    if self.bad_re:
+                        match = self.bad_re.search(line)
+                        if match:
+                            invalid_lines.append(
+                                'Forbidden content on line %d: %s' % (
+                                    line_count, match.group(0)))
+                            invalid_lines.append(self.bad_re_msg)
                     size += len(line)
             line_count += 1
             if (self.min_lines and self.min_lines > line_count or
@@ -371,9 +498,8 @@ class FileVerifier(object):
                   self.max_size and self.max_size < size):
                 self.message_args = ('failed', ' (invalid file size)')
                 return False
-            elif (self.diff_file and
-                  not os.system('diff %s %s 2>&1 >/dev/null' %
-                                (filename, self.diff_file))):
+            elif (diff_file and not os.system('diff %s %s 2>&1 >/dev/null' %
+                                              (filename, diff_file))):
                 self.message_args = ('failed', ' (file not modified)')
                 return False
         except IOError:
@@ -382,6 +508,10 @@ class FileVerifier(object):
                 self.verified = True
                 return True
             self.message_args = ('failed', ' (file does not exist)')
+            return False
+        if invalid_lines:
+            errors = '\n'.join(['\t\t%s' % x for x in invalid_lines])
+            self.message_args = ('failed', ' invalid lines\n%s' % errors)
             return False
         self.message_args = ('passed', '')
         self.verified = True
@@ -397,15 +527,33 @@ class FileVerifier(object):
 
 
 class ProcessEmail(object):
-    def relay_and_exit(self, message):
+    RE_USER_NAME = re.compile('([^@]+)@cs.ucsb.edu')
+    RE_PROJECT = re.compile(r'[^+]+\+([^@/\\]+)@cs.ucsb.edu')
+
+    @staticmethod
+    def relay_and_exit(message):
         """To be called when this script should not process the message"""
         print message
         sys.exit(0)
 
+    def __init__(self):
+        self.project = None
+        self.user = None
+        self.action = None
+        # Get email message
+        self.input = sys.stdin.read()
+        message = email.message_from_string(self.input)
+        # Verify Message
+        self.assert_valid_project(message['to'])
+        self.assert_valid_user(message['from'])
+        self.assert_valid_action(message['subject'])
+        if message.is_multipart() or message.get_payload():
+            self.relay_and_exit(self.input)
+
     def assert_valid_user(self, from_address):
         """Returns user account if valid CS account otherwise None"""
-        real_name, email_addr = email.Utils.parseaddr(from_address)
-        match = RE_USER_NAME.match(email_addr)
+        _, email_addr = email.utils.parseaddr(from_address)
+        match = self.RE_USER_NAME.match(email_addr)
         if not match:
             self.relay_and_exit(self.input)
         else:
@@ -413,8 +561,8 @@ class ProcessEmail(object):
 
     def assert_valid_project(self, to_address):
         """Returns name of project from cs160+projname or None"""
-        real_name, email_addr = email.Utils.parseaddr(to_address)
-        match = RE_PROJECT.match(email_addr)
+        _, email_addr = email.utils.parseaddr(to_address)
+        match = self.RE_PROJECT.match(email_addr)
         if not match:
             self.relay_and_exit(self.input)
         else:
@@ -428,17 +576,6 @@ class ProcessEmail(object):
         else:
             self.action = subject.strip()
 
-    def __init__(self):
-        # Get email message
-        self.input = sys.stdin.read()
-        message = email.message_from_string(self.input)
-        # Verify Message
-        self.assert_valid_project(message['to'])
-        self.assert_valid_user(message['from'])
-        self.assert_valid_action(message['subject'])
-        if message.is_multipart() or message.get_payload():
-            self.relay_and_exit(self.input)
-
     def get_triple_string(self):
         return "%s %s %s" % (self.project, self.user, self.action)
 
@@ -447,7 +584,7 @@ def auto_grade(project, user, action, verbose):
     if not verbose:
         # Setup logging
         homedir = os.path.expanduser('~')
-        log_path = os.path.join(homedir, 'logs', '%s.log' % project)
+        log_path = join(homedir, 'logs', '%s.log' % project)
         logger = logging.getLogger('auto_grade')
         try:
             handler = logging.handlers.RotatingFileHandler(log_path,
@@ -461,40 +598,41 @@ def auto_grade(project, user, action, verbose):
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
 
-    message = 'Submission: %s %s %s' % (user, project, action)
+    message = 'Submission: %s' % user
     if verbose > 0:
         print message
     else:
         logger.info(message)
 
     # Test for project specifc file, and import
-    if os.path.isfile(os.path.join(project, '__init__.py')):
-        exec 'from %s import ProjectTurnin' % project
-        turnin = locals()['ProjectTurnin'](project, user, action, verbose)
+    if os.path.isfile(join(project, '__init__.py')):
+        # pylint: disable-msg=W0122
+        exec 'from %s import ProjectSubmission' % project
+        sub_class = locals()['ProjectSubmission']
     else:
-        turnin = Turnin(project, user, action, verbose)
-
-    message = "Status: %s\n%s" % (turnin.status, turnin.message)
+        sub_class = Submission
+    submission = sub_class(project, user, action, verbose)
+    message = "Status: %s\n%s" % (submission.status, submission.message)
     if verbose:
         print message
         sys.exit(0)
 
-    for log_message in turnin.log_messages:
+    for log_message in submission.log_messages:
         logger.info(log_message)
 
     # Send email
     smtp = smtplib.SMTP()
     smtp.connect('letters')
-    to = 'To: %s@cs.ucsb.edu' % user
+    to_addr = 'To: %s@cs.ucsb.edu' % user
     subject = 'Subject: %s Result' % project
-    msg = '%s\n%s\n\n%s' % (to, subject, message)
+    msg = '%s\n%s\n\n%s' % (to_addr, subject, message)
     smtp.sendmail('%s@cs.ucsb.edu' % os.environ['LOGNAME'],
                   '%s@cs.ucsb.edu' % user, msg)
     smtp.quit()
 
 
 def display_scores(project):
-    log_path = os.path.join(os.path.expanduser('~'), 'logs', project)
+    log_path = join(os.path.expanduser('~'), 'logs', project)
     logs = glob.glob('%s.log*' % log_path)
     if not logs:
         sys.stderr.write('No log file for project: %s\n' % project)
@@ -506,29 +644,31 @@ def display_scores(project):
         for line in open(log_file).readlines():
             if 'Score' not in line:
                 continue
-            ddate, ttime, _, _, user, _, score = line[:-1].split()
-            ttime = ttime.split(',')[0]
-            t = time.strptime('%s %s' % (ddate, ttime), '%Y-%m-%d %H:%M:%S')
+            the_date, the_time, _, _, user, score = line[:-1].split()
+            the_time = the_time.split(',')[0]
+            timestamp = time.strptime('%s %s' % (the_date, the_time),
+                                      '%Y-%m-%d %H:%M:%S')
             if user not in scores:
-                scores[user] = {t: score}
-            elif t not in scores[user]:
-                scores[user][t] = score
+                scores[user] = {timestamp: score}
+            elif timestamp not in scores[user]:
+                scores[user][timestamp] = score
             else:
-                scores[user][t] = max(score, scores[user][t])
+                scores[user][timestamp] = max(score, scores[user][timestamp])
             int_score = int(score.split('/')[0])
             user_max[user] = max(user_max.setdefault(user, 0), int_score)
 
     for user in sorted(scores):
         already_score = []
-        for t in sorted(scores[user]):
-            score = scores[user][t]
+        for timestamp in sorted(scores[user]):
+            score = scores[user][timestamp]
             if score not in already_score:
                 if int(score.split('/')[0]) == user_max[user]:
                     best = '*'
                 else:
                     best = ' '
-                print '%s % 7s%s %s' % (time.strftime('%a %b %d %I:%M %p', t),
-                                      scores[user][t], best, user)
+                print '%s % 7s%s %s' % (time.strftime('%a %b %d %I:%M %p',
+                                                      timestamp),
+                                        scores[user][timestamp], best, user)
                 already_score.append(score)
         print
 
@@ -537,12 +677,24 @@ class UserDiffs(object):
     def __init__(self, project, user):
         self.project = project
         self.user = user
-        self.turnin_dir = os.path.join(os.environ['HOME'], 'TURNIN', project)
-        self.get_turnins()
+        self.submissions = None
+        self.turnin_dir = join(os.environ['HOME'], 'TURNIN', project)
+        self.get_submissions()
         self.build_diffs()
 
-    def get_turnins(self):
-        if not os.path.isdir(self.turnin_dir):
+    @staticmethod
+    def extract_submission(submission):
+        tmp_dir = tempfile.mkdtemp()
+        pipe = Popen('tar -xvzf %s -C %s' % (submission, tmp_dir),
+                     shell=True, stdout=PIPE, stderr=STDOUT)
+        pipe.wait()
+        if pipe.returncode != 0:
+            shutil.rmtree(tmp_dir)
+            raise Exception('Extraction failed')
+        return tmp_dir
+
+    def get_submissions(self):
+        if not isdir(self.turnin_dir):
             print 'Failure: Turnin directory does not exist'
             return
 
@@ -562,56 +714,53 @@ class UserDiffs(object):
     def build_diffs(self):
         base = new = None
         for submission in self.submissions:
-            new = self.extract_submission(os.path.join(self.turnin_dir,
-                                                       submission))
+            new = self.extract_submission(join(self.turnin_dir,
+                                               submission))
             if base and new:
                 print '---\n---Changed in %s---\n---' % submission
-                p = Popen('git diff -p --stat --color %s %s' % (base, new),
-                          shell=True, stdout=PIPE, stderr=STDOUT)
-                stdout, stderr = p.communicate()
+                pipe = Popen('git diff -p --stat --color %s %s' % (base, new),
+                             shell=True, stdout=PIPE, stderr=STDOUT)
+                stdout, _ = pipe.communicate()
                 print stdout
                 shutil.rmtree(base)
             base = new
         shutil.rmtree(base)
 
-    def extract_submission(self, submission):
-        tmp_dir = tempfile.mkdtemp()
-        p = Popen('tar -xvzf %s -C %s' % (submission, tmp_dir),
-                             shell=True, stdout=PIPE, stderr=STDOUT)
-        p.wait()
-        if p.returncode != 0:
-            shutil.rmtree(tmp_dir)
-            raise Exception('Extraction failed')
-        return tmp_dir
 
-
-if __name__ == '__main__':
+def main():
     # Change dir to directory with this file.
     os.chdir(sys.path[0])
 
     parser = OptionParser()
+    parser.add_option('--diffs')
+    parser.add_option('--generate-expected')
     parser.add_option('--process', action='store_true')
     parser.add_option('--scores')
-    parser.add_option('--diffs')
     parser.add_option('-v', '--verbose', action='count')
     options, args = parser.parse_args()
 
-    if options.scores:
-        display_scores(options.scores)
-        sys.exit(1)
-    elif options.diffs:
-        if len(args) > 1:
+    if options.diffs:
+        if len(args) != 1:
             parser.error('Incorrect number of arguments for --diffs')
         UserDiffs(options.diffs, args[0])
-    elif not options.process:
-        """This is called from procmailrc on the machine letters.cs which is
-           not suitable for a build environment"""
+    elif options.generate_expected:
+        project = Project(options.generate_expected)
+        project.generate_output()
+    elif options.process:
+        # pylint: disable-msg=W0142
+        if len(args) == 2:
+            auto_grade(*args, action='DEFAULT', verbose=options.verbose)
+        elif len(args) == 3:
+            auto_grade(*args, verbose=options.verbose)
+        else:
+            parser.error('incorrect number of arguments for --process')
+    elif options.scores:
+        display_scores(options.scores)
+    else:
+        # This is called from procmailrc on the machine letters.cs which is not
+        # suitable for a build environment
         arg_string = ProcessEmail().get_triple_string()
         os.system('ssh csil %s --process %s' % (sys.argv[0], arg_string))
-        sys.exit(0)
-    elif len(args) == 2:
-        auto_grade(*args, action='DEFAULT', verbose=options.verbose)
-    elif len(args) == 3:
-        auto_grade(*args, verbose=options.verbose)
-    else:
-        parser.error('incorrect number of arguments')
+
+if __name__ == '__main__':
+    sys.exit(main())
