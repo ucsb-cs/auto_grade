@@ -11,7 +11,7 @@ if [ -n "$output" ]; then
 fi
 
 # pylint
-output=$(pylint --rcfile=$dir/.pylintrc * 2> /dev/null)
+output=$(find $dir -name [A-Za-z_]\*.py -exec pylint --rcfile=$dir/.pylintrc {} \; 2>/dev/null)
 if [ -n "$output" ]; then
     echo "--pylint--"
     echo -e "$output"

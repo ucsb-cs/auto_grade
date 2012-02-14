@@ -1,7 +1,7 @@
 VERBOSE=yes
 LOGFILE=procmail.log
 
-:0 fhw :auto_grade.lock
+:0 fhw
 | ./auto_grade/auto_grade.py
 
 # Uncomment the following to allow for forwarding of messages which aren't
