@@ -7,10 +7,10 @@ from auto_grade import FileVerifier, Submission
 class ProjectSubmission(Submission):
     """The project configuration"""
     # pylint: disable-msg=E0101
-    def __init__(self, project, user, action, verbose):
+    def __init__(self, *args, **kwargs):
         # The parent constructor will automatically (1) find their most recent
         # submission, and (2) extract that submission.
-        super(ProjectSubmission, self).__init__(project, user, action, verbose)
+        super(ProjectSubmission, self).__init__(*args, **kwargs)
 
         # This is the list of files that can be submitted. The optional
         # argument on the README file means that file need not be submitted.

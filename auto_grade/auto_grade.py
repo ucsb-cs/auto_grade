@@ -15,6 +15,7 @@ import select
 import shutil
 import signal
 import smtplib
+import stat
 import sys
 import tempfile
 import time
@@ -190,13 +191,14 @@ class Project(object):
 
 class Submission(Project):
     """Class for representing student submissions of a certain project."""
-    def __init__(self, project, user, action, verbose):
+    def __init__(self, project, user, action, verbose, turnin_base_path):
         super(Submission, self).__init__(project)
         self.user = user
         self.action = action
         self.log_messages = []
         self.submission = None
         self.verbose = verbose
+        self.turnin_base_path = turnin_base_path
         self.turnin_dir = join(os.environ['HOME'], 'TURNIN', project)
         self.work_dir = join(self.turnin_dir, user)
         self.message = 'User: %s\nProject: %s\n' % (user, project)
@@ -262,7 +264,7 @@ class Submission(Project):
                 continue
             shutil.copy(join(build_files_path, filename), self.build_dir)
 
-    def make_submission(self, src_dir='', action='', silent=False):
+    def make_submission(self, src_dir='', target='', silent=False):
         self.build_dir = join(self.turnin_dir, self.user, src_dir)
         if not isdir(self.build_dir):
             self.log_error('Build directory %r does not exist' %
@@ -281,7 +283,7 @@ class Submission(Project):
         makefile_location = '-f %s' % makefile
 
         make_cmd = 'make %s -C %s %s' % (makefile_location, self.build_dir,
-                                         action)
+                                         target)
         pipe = Popen(make_cmd, shell=True, stdout=PIPE, stderr=STDOUT)
         pipe.wait()
         if not silent:
@@ -289,8 +291,22 @@ class Submission(Project):
                                      pipe.stdout.readlines()])
         return pipe.returncode == 0
 
-    def file_checker(self, file_verifiers, exact=False):
+    def permission_checker(self):
+        self.message += '...Verifying source directory permissions\n'
         success = True
+        if self.turnin_base_path and isdir(self.turnin_base_path):
+            dir_stat = os.stat(self.turnin_base_path)
+            if dir_stat.st_mode & (stat.S_IXGRP | stat.S_IXOTH):
+                self.message += ('\t{0} is readable by others\n\tExecute '
+                                 '`chmod 700 {0}` and submit again.\n').format(
+                    self.turnin_base_path)
+                success = False
+        if success:
+            self.message += '\tpassed\n'
+        return success
+
+    def file_checker(self, file_verifiers, exact=False):
+        success = self.permission_checker()
         self.message += '...Verifying files\n'
 
         original_files_dir = join(self.project, 'original_files')
@@ -512,14 +528,15 @@ class FileVerifier(object):
         self.exists = False
         self.message_args = None
 
-    def verify(self, work_dir, diff_file=None):
+    def verify(self, work_dir, diff_file):
+        # Match case sensitivity
         if not self.case_sensitive:
-            basename = os.path.basename(self.name)
+            basename = os.path.basename(self.name).lower()
             work_dir = join(work_dir, os.path.dirname(self.name))
             mapping = dict((x.lower(), x) for x in os.listdir(work_dir))
             if basename in mapping:
-                if basename == self.name:
-                    self.name = mapping[self.name]
+                if len(basename) == len(self.name):
+                    self.name = mapping[basename]
                 else:
                     self.name = join(work_dir, mapping[basename])
         filename = join(work_dir, self.name)
@@ -614,7 +631,8 @@ def auto_grade(project, user, user_email=None, action='DEFAULT',
         sub_class = locals()['ProjectSubmission']
     else:
         sub_class = Submission
-    submission = sub_class(project, user, action, verbose)
+    submission = sub_class(project=project, user=user, action=action,
+                           turnin_base_path=base_path, verbose=verbose)
     message = "Status: %s\n%s" % (submission.status, submission.message)
     if verbose:
         print message
