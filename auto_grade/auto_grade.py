@@ -46,15 +46,24 @@ class Project(object):
             return pt_val + ' pt'
 
     @staticmethod
-    def timed_subprocess(cmd, in_file, time_limit, files, stderr,
+    def timed_subprocess(cmd, test_input, time_limit, files, stderr,
                          output_filter):
         """Returns output_file, returnstatus for ran process.
-        Return status of None indicates the process timed out."""
+        Return status of None indicates the process timed out.
 
+        input can either be a file object, None, or a string.
+        """
         if not stderr:
             stderr = open('/dev/null', 'w')
         else:
             stderr = STDOUT
+
+        if not test_input:
+            in_file = None
+        elif isinstance(test_input, str):
+            in_file = PIPE
+        else:
+            in_file = test_input
 
         tmp_dir = tempfile.mkdtemp()
         if files:
@@ -64,6 +73,8 @@ class Project(object):
             poll = select.epoll()
             main_pipe = Popen(cmd.split(), stdin=in_file, stdout=PIPE,
                               stderr=stderr, cwd=tmp_dir)
+            if in_file == PIPE:
+                main_pipe.stdin.write(test_input)
             if output_filter:
                 filter_pipe = Popen(output_filter.split(), cwd=tmp_dir,
                                     stdin=main_pipe.stdout, stdout=PIPE)
@@ -103,8 +114,8 @@ class Project(object):
 
     def fetch_tests(self):
         self.input_dir = join(self.project, 'input')
-        if not isdir(self.input_dir):
-            raise Exception('Scoring input directory does not exist')
+        #if not isdir(self.input_dir):
+        #    raise Exception('Scoring input directory does not exist')
 
         config = self.test_config
         test_files_dir = join(self.project, 'test_files')
@@ -114,20 +125,24 @@ class Project(object):
         else:
             test_files = {}
 
-        tests = sorted(os.listdir(self.input_dir))
+        test_inputs = sorted(os.listdir(self.input_dir))
         for section in sorted(config.sections(), key=len, reverse=True):
             count = 1
             settings = TestSettings(self.test_config, section, self.project,
                                     self.build_dir, test_files)
             remaining = []
-            for test in tests:
-                if test.startswith(section):
-                    yield test, settings, count
+            for input_file in test_inputs:
+                if input_file.startswith(section):
+                    yield input_file, settings, count
                     count += 1
                 else:
-                    remaining.append(test)
-            tests = remaining
-        if not tests:
+                    remaining.append(input_file)
+            test_inputs = remaining
+
+            if count == 1:  # No provided input files, use the input argument
+                yield None, settings, None
+
+        if not test_inputs:
             return
         settings = TestSettings(self.test_config, 'DEFAULT', self.project,
                                 self.build_dir, test_files)
@@ -142,13 +157,21 @@ class Project(object):
         if not isdir(output_dir):
             os.mkdir(output_dir)
         for test, settings, _ in self.fetch_tests():
-            print 'Running %r' % test
-            with open(join(self.input_dir, test)) as test_in:
-                status, output = self.timed_subprocess(settings.args, test_in,
-                                                       settings.time_limit,
-                                                       settings.files,
-                                                       settings.check_stderr,
-                                                       settings.output_filter)
+            if test:
+                print 'Running %r' % test
+                with open(join(self.input_dir, test)) as test_file:
+                    status, output = self.timed_subprocess(
+                        settings.args, test_file, settings.time_limit,
+                        settings.files, settings.check_stderr,
+                        settings.output_filter)
+            else:
+                test = settings._section
+                print 'Running %r' % test
+                status, output = self.timed_subprocess(
+                    settings.args, settings.input, settings.time_limit,
+                    settings.files, settings.check_stderr,
+                    settings.output_filter)
+
             if status is None:
                 raise Exception('Oops, you timed out')
 
@@ -328,10 +351,21 @@ class Submission(Project):
         self.message += '...Scoring\n'
         passed = total = 0
         for test, settings, count in self.fetch_tests():
-            name = '%s (%d)' % (settings.name if settings.name else test,
-                                count)
+            if test:
+                name = '%s (%d)' % (settings.name if settings.name else test,
+                                    count)
+            else:
+                test = settings._section
+                name = settings.name if settings.name else test
+
+            total += settings.points_possible
+
             if settings.description:
                 name += ' [desc: %s]' % settings.description
+            if settings.always_fail:
+                self.score_failure(name, settings.points_possible, None)
+                continue
+
             out_file = join(output_dir, '%s.stdout' % test)
             if not os.path.isfile(out_file):
                 raise Exception('No outfile: %s' % out_file)
@@ -339,15 +373,18 @@ class Submission(Project):
             if not os.path.isfile(status_file):
                 raise Exception('No status file %s' % status_file)
 
-            total += settings.points_possible
-
             expected = open(out_file).readlines()
-            with open(join(self.input_dir, test)) as test_in:
-                status, output = self.timed_subprocess(settings.args, test_in,
-                                                       settings.time_limit,
-                                                       settings.files,
-                                                       settings.check_stderr,
-                                                       settings.output_filter)
+            if count:  # Test from input file
+                with open(join(self.input_dir, test)) as test_in:
+                    status, output = self.timed_subprocess(
+                        settings.args, test_in, settings.time_limit,
+                        settings.files, settings.check_stderr,
+                        settings.output_filter)
+            else:
+                status, output = self.timed_subprocess(
+                    settings.args, settings.input, settings.time_limit,
+                    settings.files, settings.check_stderr,
+                    settings.output_filter)
             if status == None:
                 self.score_timeout_failure(name, settings.points_possible,
                                            settings.time_limit)
@@ -403,8 +440,10 @@ class Submission(Project):
     def score_failure(self, name, points, diff):
         self.message += '\t%s - Failed (%s)\n' % (name,
                                                   self.point_string(points))
-        self.message += diff
-        self.message += '\n'
+        if diff:
+            self.message += '<BEGIN DIFF>\n'
+            self.message += diff
+            self.message += ('</END DIFF>\n\n')
 
     def log_error(self, message):
         self.log_messages.append(message)
@@ -419,11 +458,15 @@ class TestSettings(object):
 
         self.args = join(build_dir, self._items['args'])
         self.binary = self.args.split()[0]
-        if not os.path.isfile(self.binary):
+        if not os.path.isfile(self.binary) and not self.always_fail:
             raise Exception('Binary %r does not exist for section %r' %
                             (self.binary, section))
         self.files = [test_files[x.strip()] for x in
                       self._items['files'].split(',') if x.strip()]
+        if self._items['input']:
+            self.input = self._items['input'] + '\n'
+        else:
+            self.input = None
         if self._items['output_filter']:
             self.output_filter = join(os.getcwd(), project_dir,
                                       self._items['output_filter'])
@@ -435,7 +478,8 @@ class TestSettings(object):
             self.output_filter = None
 
     def __getattr__(self, attribute):
-        if attribute in ('timeout_quit', 'check_status', 'check_stderr'):
+        if attribute in ('timeout_quit', 'check_status', 'check_stderr',
+                         'always_fail'):
             return self._config.getboolean(self._section, attribute)
         if attribute in ('points', 'points_possible', 'time_limit'):
             return float(self._items[attribute])
@@ -483,7 +527,7 @@ class FileVerifier(object):
                         if match:
                             invalid_lines.append(
                                 'Forbidden content on line %d: %s' % (
-                                    line_count, match.group(0)))
+                                    line_count + 1, match.group(0)))
                             invalid_lines.append(self.bad_re_msg)
                     size += len(line)
             line_count += 1
@@ -583,8 +627,13 @@ class ProcessEmail(object):
 def auto_grade(project, user, action, verbose):
     if not verbose:
         # Setup logging
-        homedir = os.path.expanduser('~')
-        log_path = join(homedir, 'logs', '%s.log' % project)
+        log_dir = join(os.path.expanduser('~'), 'logs')
+        try:
+            os.mkdir(log_dir)
+            os.chmod(log_dir, 0700)
+        except OSError:
+            pass
+        log_path = join(log_dir, '%s.log' % project)
         logger = logging.getLogger('auto_grade')
         try:
             handler = logging.handlers.RotatingFileHandler(log_path,

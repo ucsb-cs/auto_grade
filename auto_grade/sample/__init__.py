@@ -7,7 +7,7 @@ class ProjectSubmission(Submission):
     def __init__(self, project, user, action, verbose):
         # The parent constructor will automatically (1) find their most recent
         # submission, and (2) extract that submission.
-        Submission.__init__(self, project, user, action, verbose)
+        super(ProjectSubmission, self).__init__(project, user, action, verbose)
 
         # This is the list of files that can be submitted. The optional
         # argument on the README file means that file need not be submitted.

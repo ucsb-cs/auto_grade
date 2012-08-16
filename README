@@ -29,7 +29,7 @@ passwordless SSH enabled such that the account can SSH into itself on another
 machine. This can be accomplished by simply doing:
 
 $ ssh-keygen
-$ cp ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+$ cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
 
 The auto_grade folder contains auto_grade.py, and a sample folder which
 contains the auto_grade module for the sample project.
