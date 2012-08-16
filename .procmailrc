@@ -1,8 +1,8 @@
 VERBOSE=yes
 LOGFILE=procmail.log
 
-:0 fhw
-| ./auto_grade/auto_grade.py
+:0 fbhw
+| ./auto_grade/auto_grade.py --handle-email
 
 # Uncomment the following to allow for forwarding of messages which aren't
 # targeted towards auto_grade. By default these messages will be delivered to

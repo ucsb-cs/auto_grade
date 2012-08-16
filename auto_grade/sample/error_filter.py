@@ -1,8 +1,11 @@
 #!/usr/bin/env python
+"""A simple program that filters lines starting with ERROR:"""
+
 import sys
 
 
 def main():
+    """Run the filter."""
     for line in sys.stdin:
         if line.startswith('ERROR: '):
             print 'ERROR: <FILTERED>'

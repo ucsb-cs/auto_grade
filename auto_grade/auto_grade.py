@@ -1,9 +1,12 @@
 #!/usr/bin/env python
+"""A system to facilitate automated feedback based around UCSB's turnin."""
+
 import ConfigParser
 import cStringIO
 import difflib
 import email
 import glob
+import json
 import logging
 import logging.handlers
 import os
@@ -16,7 +19,7 @@ import sys
 import tempfile
 import time
 from os.path import isdir, join
-from optparse import OptionParser
+from optparse import OptionGroup, OptionParser
 from subprocess import Popen, PIPE, STDOUT
 
 
@@ -34,6 +37,7 @@ class Project(object):
 
     @staticmethod
     def point_string(points, with_pt=True):
+        """Generate the string to display the number of points."""
         if int(points) == points:
             pt_val = '%d' % points
         else:
@@ -113,6 +117,7 @@ class Project(object):
         return main_status, output
 
     def fetch_tests(self):
+        """Generate all the input test cases."""
         self.input_dir = join(self.project, 'input')
         #if not isdir(self.input_dir):
         #    raise Exception('Scoring input directory does not exist')
@@ -146,10 +151,11 @@ class Project(object):
             return
         settings = TestSettings(self.test_config, 'DEFAULT', self.project,
                                 self.build_dir, test_files)
-        for i, test in enumerate(tests):
+        for i, test in enumerate(test_inputs):
             yield test, settings, i + 1
 
     def generate_output(self):
+        """Generate the output files for each test case."""
         self.build_dir = join(os.getcwd(), self.project, 'solution')
         if not isdir(self.build_dir):
             raise Exception('Solution dir %r does not exist.' % self.build_dir)
@@ -165,7 +171,7 @@ class Project(object):
                         settings.files, settings.check_stderr,
                         settings.output_filter)
             else:
-                test = settings._section
+                test = settings._section  # pylint: disable-msg=W0212
                 print 'Running %r' % test
                 status, output = self.timed_subprocess(
                     settings.args, settings.input, settings.time_limit,
@@ -187,6 +193,7 @@ class Submission(Project):
     def __init__(self, project, user, action, verbose):
         super(Submission, self).__init__(project)
         self.user = user
+        self.action = action
         self.log_messages = []
         self.submission = None
         self.verbose = verbose
@@ -255,7 +262,7 @@ class Submission(Project):
                 continue
             shutil.copy(join(build_files_path, filename), self.build_dir)
 
-    def make_submission(self, src_dir='', target='', silent=False):
+    def make_submission(self, src_dir='', action='', silent=False):
         self.build_dir = join(self.turnin_dir, self.user, src_dir)
         if not isdir(self.build_dir):
             self.log_error('Build directory %r does not exist' %
@@ -274,7 +281,7 @@ class Submission(Project):
         makefile_location = '-f %s' % makefile
 
         make_cmd = 'make %s -C %s %s' % (makefile_location, self.build_dir,
-                                         target)
+                                         action)
         pipe = Popen(make_cmd, shell=True, stdout=PIPE, stderr=STDOUT)
         pipe.wait()
         if not silent:
@@ -329,7 +336,7 @@ class Submission(Project):
 
             patch_file = open(join(self.work_dir, patch_filename))
             pipe = Popen('patch -d %s -p1' % src_dir, shell=True,
-                      stdin=patch_file, stdout=PIPE, stderr=STDOUT)
+                         stdin=patch_file, stdout=PIPE, stderr=STDOUT)
             stdout, _ = pipe.communicate()[:2]
             patch_file.close()
             self.message += '\n'.join(['\t%s' % x for x in stdout.split('\n')
@@ -385,7 +392,7 @@ class Submission(Project):
                     settings.args, settings.input, settings.time_limit,
                     settings.files, settings.check_stderr,
                     settings.output_filter)
-            if status == None:
+            if status is None:
                 self.score_timeout_failure(name, settings.points_possible,
                                            settings.time_limit)
 
@@ -490,7 +497,7 @@ class TestSettings(object):
 
 class FileVerifier(object):
     def __init__(self, name, min_lines=0, max_lines=None,
-                 min_size=0, max_size=None, diff_file=None, optional=False,
+                 min_size=0, max_size=None, optional=False,
                  case_sensitive=True, bad_re=None, bad_re_msg=None):
         self.name = name
         self.min_lines = min_lines
@@ -531,15 +538,15 @@ class FileVerifier(object):
                             invalid_lines.append(self.bad_re_msg)
                     size += len(line)
             line_count += 1
-            if (self.min_lines and self.min_lines > line_count or
-                self.max_lines and self.max_lines < line_count):
+            if self.min_lines and self.min_lines > line_count or \
+                    self.max_lines and self.max_lines < line_count:
                 self.message_args = ('failed', ' (invalid line count: '
                                      'count=%d min=%s max=%s)' %
                                      (line_count, self.min_lines,
                                       self.max_lines))
                 return False
-            elif (self.min_size and self.min_size > size or
-                  self.max_size and self.max_size < size):
+            elif self.min_size and self.min_size > size or \
+                    self.max_size and self.max_size < size:
                 self.message_args = ('failed', ' (invalid file size)')
                 return False
             elif (diff_file and not os.system('diff %s %s 2>&1 >/dev/null' %
@@ -570,61 +577,8 @@ class FileVerifier(object):
         return template % self.message_args
 
 
-class ProcessEmail(object):
-    RE_USER_NAME = re.compile('([^@]+)@cs.ucsb.edu')
-    RE_PROJECT = re.compile(r'[^+]+\+([^@/\\]+)@cs.ucsb.edu')
-
-    @staticmethod
-    def relay_and_exit(message):
-        """To be called when this script should not process the message"""
-        print message
-        sys.exit(0)
-
-    def __init__(self):
-        self.project = None
-        self.user = None
-        self.action = None
-        # Get email message
-        self.input = sys.stdin.read()
-        message = email.message_from_string(self.input)
-        # Verify Message
-        self.assert_valid_project(message['to'])
-        self.assert_valid_user(message['from'])
-        self.assert_valid_action(message['subject'])
-        if message.is_multipart() or message.get_payload():
-            self.relay_and_exit(self.input)
-
-    def assert_valid_user(self, from_address):
-        """Returns user account if valid CS account otherwise None"""
-        _, email_addr = email.utils.parseaddr(from_address)
-        match = self.RE_USER_NAME.match(email_addr)
-        if not match:
-            self.relay_and_exit(self.input)
-        else:
-            self.user = match.group(1)
-
-    def assert_valid_project(self, to_address):
-        """Returns name of project from cs160+projname or None"""
-        _, email_addr = email.utils.parseaddr(to_address)
-        match = self.RE_PROJECT.match(email_addr)
-        if not match:
-            self.relay_and_exit(self.input)
-        else:
-            self.project = match.group(1)
-
-    def assert_valid_action(self, subject):
-        """Returns action name from subject line or None.
-           Should be single word."""
-        if not len(subject.split()) == 1:
-            self.relay_and_exit(self.input)
-        else:
-            self.action = subject.strip()
-
-    def get_triple_string(self):
-        return "%s %s %s" % (self.project, self.user, self.action)
-
-
-def auto_grade(project, user, action, verbose):
+def auto_grade(project, user, user_email=None, action='DEFAULT',
+               base_path=None, verbose=0):
     if not verbose:
         # Setup logging
         log_dir = join(os.path.expanduser('~'), 'logs')
@@ -722,6 +676,24 @@ def display_scores(project):
         print
 
 
+def process_email():
+    # Parse the email from standard in
+    message = email.message_from_string(sys.stdin.read())
+
+    # Only process the message if the subject matches and the body is json
+    if message['subject'] == 'auto_grade email':
+        try:
+            json_string = message.get_payload(decode=True)
+            json.loads(json_string)
+            return json_string
+        except ValueError:
+            pass
+
+    # Otherwise email the message
+    print message.as_string()
+    sys.exit(0)
+
+
 class UserDiffs(object):
     def __init__(self, project, user):
         self.project = project
@@ -777,15 +749,24 @@ class UserDiffs(object):
 
 
 def main():
+    """Run the program."""
     # Change dir to directory with this file.
     os.chdir(sys.path[0])
 
     parser = OptionParser()
     parser.add_option('--diffs')
-    parser.add_option('--generate-expected')
-    parser.add_option('--process', action='store_true')
-    parser.add_option('--scores')
+    parser.add_option('--generate-expected',
+                      help='Generate the expected output for an assignment')
+    parser.add_option('--process')
+    parser.add_option('--scores',
+                      help='Output the scores for an assignment')
     parser.add_option('-v', '--verbose', action='count')
+    group = OptionGroup(parser, 'Internal options')
+    group.add_option('--handle-email', action='store_true',
+                     help='Handle the message from procmail')
+    group.add_option('--process-json', action='store_true',
+                     help='Process the submission specified in the json data')
+    parser.add_option_group(group)
     options, args = parser.parse_args()
 
     if options.diffs:
@@ -796,20 +777,27 @@ def main():
         project = Project(options.generate_expected)
         project.generate_output()
     elif options.process:
-        # pylint: disable-msg=W0142
-        if len(args) == 2:
-            auto_grade(*args, action='DEFAULT', verbose=options.verbose)
-        elif len(args) == 3:
-            auto_grade(*args, verbose=options.verbose)
-        else:
-            parser.error('incorrect number of arguments for --process')
+        if len(args) != 1:
+            parser.error('--process requires username argument')
+        auto_grade(project=options.process, user=args[0],
+                   verbose=options.verbose)
     elif options.scores:
         display_scores(options.scores)
-    else:
+    elif options.handle_email:
         # This is called from procmailrc on the machine letters.cs which is not
         # suitable for a build environment
-        arg_string = ProcessEmail().get_triple_string()
-        os.system('ssh csil %s --process %s' % (sys.argv[0], arg_string))
+        json_string = process_email()
+        command = 'echo \'{0}\' | ssh csil {1} --process-json'
+        os.system(command.format(json_string, sys.argv[0]))
+    elif options.process_json:
+        # Json data is in stdin
+        try:
+            data = json.load(sys.stdin)
+        except ValueError:
+            parser.error('stdin does not contain json data')
+        auto_grade(verbose=options.verbose, **data)
+    else:
+        parser.error('No option specified')
 
 if __name__ == '__main__':
     sys.exit(main())

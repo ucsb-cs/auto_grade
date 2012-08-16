@@ -1,8 +1,11 @@
 #!/usr/bin/env python
+"""An example project configuration."""
+
 from auto_grade import FileVerifier, Submission
 
 
 class ProjectSubmission(Submission):
+    """The project configuration"""
     # pylint: disable-msg=E0101
     def __init__(self, project, user, action, verbose):
         # The parent constructor will automatically (1) find their most recent
