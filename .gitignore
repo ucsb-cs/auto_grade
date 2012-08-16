@@ -1,0 +1,9 @@
+*.pyc
+auto_grade/sample/output
+auto_grade/sample/solution/Makefile
+auto_grade/sample/solution/char_count
+auto_grade/hw*
+auto_grade/lab*
+auto_grade/pj*
+auto_grade/prog*
+auto_grade/proj*
