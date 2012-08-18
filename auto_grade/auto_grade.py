@@ -113,6 +113,9 @@ class Project(object):
             main_status = main_pipe.wait()
             output.seek(0)
             output = output.readlines()
+        except OSError:
+            main_status = False
+            output = None
         finally:
             shutil.rmtree(tmp_dir)
         return main_status, output
@@ -181,6 +184,9 @@ class Project(object):
 
             if status is None:
                 raise Exception('Oops, you timed out')
+            elif status is False:
+                raise Exception('There was an execution error')
+
 
             with open(join(output_dir, '%s.stdout' % test), 'w') as file_obj:
                 file_obj.write(''.join(output))
@@ -415,6 +421,9 @@ class Submission(Project):
                 if settings.timeout_quit:
                     return passed, -1
                 continue
+            elif status is False:
+                self.score_execution_failure(name, settings.points_possible)
+                continue
 
             # Only show diff_lines lines excluding first 3
             diff = []
@@ -431,6 +440,9 @@ class Submission(Project):
             diff = ''.join(diff[3:max_lines])
             if max_lines and max_lines < diff_lines:
                 diff += '...remaining diff truncated...\n'
+
+            if diff:
+                diff = '<BEGIN DIFF>\n{0}<END DIFF>\n\n'.format(diff)
 
             if settings.check_status:
                 expected = int(open(status_file).read())
@@ -456,17 +468,19 @@ class Submission(Project):
             self.log_messages.append('Score: %s %s/%s' % (self.user,
                                                           passed, total))
 
+    def score_execution_failure(self, name, points):
+        self.message += '\t%s - Program execution failed (%s)\n' % (
+            name, self.point_string(points))
+
     def score_timeout_failure(self, name, points, time_limit):
         self.message += '\t%s - Took longer than %d seconds (%s)\n' % (
             name, time_limit, self.point_string(points))
 
-    def score_failure(self, name, points, diff):
+    def score_failure(self, name, points, output):
         self.message += '\t%s - Failed (%s)\n' % (name,
                                                   self.point_string(points))
-        if diff:
-            self.message += '<BEGIN DIFF>\n'
-            self.message += diff
-            self.message += ('</END DIFF>\n\n')
+        if output:
+            self.message += output
 
     def log_error(self, message):
         self.log_messages.append(message)
