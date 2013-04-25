@@ -77,7 +77,7 @@ class Project(object):
         try:
             poll = select.epoll()
             main_pipe = Popen(cmd.split(), stdin=in_file, stdout=PIPE,
-                              stderr=stderr, cwd=tmp_dir)
+                              stderr=stderr, cwd=tmp_dir, preexec_fn=os.setsid)
             if in_file == PIPE:
                 main_pipe.stdin.write(test_input)
             if output_filter:
@@ -95,12 +95,7 @@ class Project(object):
             while do_poll:
                 remaining = start + time_limit - time.time()
                 if remaining <= 0:
-                    os.kill(main_pipe.pid, signal.SIGKILL)
-                    #if os.fork():
-                    #    time.sleep(.01)
-                    #    os.killpg(os.getpgid(main_pipe.pid), signal.SIGKILL)
-                    #else:
-                    #    os.setpgrp()
+                    os.killpg(main_pipe.pid, signal.SIGKILL)
                     return None, None
                 rlist = poll.poll(remaining)
                 for file_descriptor, event in rlist:
