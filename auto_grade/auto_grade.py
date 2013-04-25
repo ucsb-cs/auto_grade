@@ -182,7 +182,6 @@ class Project(object):
             elif status is False:
                 raise Exception('There was an execution error')
 
-
             with open(join(output_dir, '%s.stdout' % test), 'w') as file_obj:
                 file_obj.write(''.join(output))
             # Always write status regardless of check_status setting
@@ -299,8 +298,8 @@ class Submission(Project):
             dir_stat = os.stat(self.turnin_base_path)
             if dir_stat.st_mode & (stat.S_IXGRP | stat.S_IXOTH):
                 self.message += ('\t{0} is readable by others\n\tExecute '
-                                 '`chmod 700 {0}` and submit again.\n').format(
-                    self.turnin_base_path)
+                                 '`chmod 700 {0}` and submit again.\n'
+                                 .format(self.turnin_base_path))
                 success = False
         if success:
             self.message += '\tpassed\n'
