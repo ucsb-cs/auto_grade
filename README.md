@@ -1,3 +1,14 @@
+# Submit.cs Recommendation
+
+This program was written in 2009 when `turnin` was the primary method for
+students to submit their assignments. As of 2013 an online submission system
+exists that is vastly superior in every way.
+
+https://submit.cs.ucsb.edu
+
+Please encourage your instructor to use this system even if you do not intend
+to use it for its testing capabilities.
+
 ## Installation
 
 All the files within this directory, except for this README of course
